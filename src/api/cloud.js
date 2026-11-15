@@ -8,11 +8,16 @@ import { DEFAULT_SETTINGS, uid } from '../lib/core'
 const snake = (s) => s.replace(/[A-Z]/g, (c) => '_' + c.toLowerCase())
 const camel = (s) => s.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase())
 
+// 日期/时间戳/数值/ID 类列不接受空字符串（Postgres 会报 invalid input syntax），
+// 统一在数据层边界把 '' 归一为 null，任何表单/路径不再触发此类错误。
+const NULLABLE_EMPTY = /(^date$|_date$|_at$|^hours$|_hours$|^price$|^amount$|_id$)/
+
 const toRow = (obj) =>
   Object.fromEntries(
     Object.entries(obj)
       .filter(([k, v]) => v !== undefined)
       .map(([k, v]) => [snake(k), v])
+      .map(([k, v]) => [k, v === '' && NULLABLE_EMPTY.test(k) ? null : v])
   )
 const fromRow = (row) => Object.fromEntries(Object.entries(row).map(([k, v]) => [camel(k), v]))
 
