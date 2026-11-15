@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.zip
+.DS_Store
+*.log
+.zcode/
+
+# 凭据红线：以下内容永不入库（当前仓库不含）
+# - Supabase 数据库密码 / service_role key / 个人访问令牌（sbp_）
+# - DeepSeek 等 LLM API Key
+# .env.production 仅含公开的 URL + anon key（受 RLS 保护），可入库

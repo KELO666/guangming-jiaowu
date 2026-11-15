@@ -1,0 +1,13 @@
+{
+  "name": "光明教务",
+  "short_name": "光明教务",
+  "description": "少儿编程机器人机构教务管理：排课、点名消课、课时与续费管理",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f5f6f8",
+  "theme_color": "#2563eb",
+  "icons": [
+    { "src": "./icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "./icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}
