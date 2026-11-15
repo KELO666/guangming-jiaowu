@@ -13,13 +13,13 @@ import {
 import { useApp } from '../store'
 import { fmtDateFull, hhmm, hoursFmt, money, remaining, round2, unitPrice, STATUS_LABEL } from '../lib/core'
 import { pickPackage } from '../lib/logic'
-import { Avatar, Badge, Button, Card, Input, Modal, cn } from '../ui'
+import { Avatar, Badge, Button, Card, Input, Modal, Spinner, cn } from '../ui'
 
 // ============================================================
 // 点名消课面板：默认全员到课，只标例外；临时加人；逐人换课包
 // ============================================================
 export default function AttendanceSheet({ session }) {
-  const { db, rosterOf, saveAttendance, resetAttendance, update, create, toast, confirm, settings } = useApp()
+  const { db, rosterOf, saveAttendance, resetAttendance, create, toast, confirm, settings } = useApp()
   const nav = useNavigate()
 
   const group = db.groups.find((g) => g.id === session.groupId) || null
@@ -46,6 +46,7 @@ export default function AttendanceSheet({ session }) {
   const [hours, setHours] = useState(Number(session.hours) || 2)
   const [pkgModalFor, setPkgModalFor] = useState(null) // studentId
   const [addModal, setAddModal] = useState(false)
+  const [saving, setSaving] = useState(false)
 
   const studentById = useMemo(() => new Map(db.students.map((s) => [s.id, s])), [db.students])
 
@@ -124,8 +125,8 @@ export default function AttendanceSheet({ session }) {
     }
     const ok = await confirm('保存点名', `将消课 ${hoursFmt(summary.totalHours)} 课时、扣费 ${money(summary.totalAmount)}，确认保存？`)
     if (!ok) return
+    setSaving(true)
     try {
-      if (hours !== Number(session.hours)) await update('sessions', session.id, { hours })
       const r = await saveAttendance({ ...session, hours }, entries)
       if (!r.ok) {
         toast('保存失败：有学生缺少课包', 'error')
@@ -135,17 +136,22 @@ export default function AttendanceSheet({ session }) {
       nav(-1)
     } catch (e) {
       toast(e.message || '保存失败', 'error')
+    } finally {
+      setSaving(false)
     }
   }
 
   const doReset = async () => {
     const ok = await confirm('撤销点名', '将回冲已扣的课时和金额，本节课恢复为待点名。确定撤销？', true)
     if (!ok) return
+    setSaving(true)
     try {
       await resetAttendance(session.id)
       toast('已撤销本次点名')
     } catch (e) {
       toast(e.message || '操作失败', 'error')
+    } finally {
+      setSaving(false)
     }
   }
 
@@ -259,7 +265,7 @@ export default function AttendanceSheet({ session }) {
                       key={st}
                       onClick={() => setStatus(e.studentId, { status: st })}
                       className={cn(
-                        'rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors',
+                        'shrink-0 whitespace-nowrap rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors',
                         e.status === st
                           ? st === 'leave'
                             ? 'bg-amber-100 text-amber-700'
@@ -290,12 +296,13 @@ export default function AttendanceSheet({ session }) {
           </div>
           <div className="flex gap-2">
             {hasSaved && (
-              <Button variant="outline" onClick={doReset}>
-                <Undo2 size={16} /> {isCompleted ? '撤销点名' : '撤销登记'}
+              <Button variant="outline" onClick={doReset} disabled={saving}>
+                <Undo2 size={16} /> {saving ? '处理中…' : isCompleted ? '撤销点名' : '撤销登记'}
               </Button>
             )}
-            <Button size="lg" onClick={doSave} disabled={noPkgIds.length > 0}>
-              <Check size={18} /> 保存点名并消课
+            <Button size="lg" onClick={doSave} disabled={noPkgIds.length > 0 || saving}>
+              {saving ? <Spinner className="border-white/40 border-t-white" /> : <Check size={18} />}
+              {saving ? '保存中…' : '保存点名并消课'}
             </Button>
           </div>
         </div>

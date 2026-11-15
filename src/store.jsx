@@ -234,9 +234,15 @@ export function AppProvider({ children }) {
         settings: db.settings,
       })
       if (noPkg.length) return { ok: false, noPkg }
+      // 课时若被修改，合并进 sessionPatch 一次写入（省一次往返）
+      const stored = db.sessions.find((s) => s.id === session.id)
+      const hoursChanged = stored && session.hours != null && Number(session.hours) !== Number(stored.hours)
       await api.saveAttendanceBatch({
         sessionId: session.id,
-        sessionPatch: complete ? { status: 'completed' } : {},
+        sessionPatch: {
+          ...(complete ? { status: 'completed' } : {}),
+          ...(hoursChanged ? { hours: session.hours } : {}),
+        },
         upserts,
         deltas,
       })

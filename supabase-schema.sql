@@ -117,3 +117,84 @@ create policy "auth_all_group_students" on class_group_students for all to authe
 create policy "auth_all_sessions" on sessions for all to authenticated using (true) with check (true);
 create policy "auth_all_attendance" on attendance for all to authenticated using (true) with check (true);
 create policy "auth_all_settings" on settings for all to authenticated using (true) with check (true);
+
+-- ============================================================
+-- v1.4.3 消课加速函数：整个点名保存 / 撤销在数据库端一次完成
+-- （1 次网络往返 + 事务原子性，替代前端逐条往返）
+-- 已有库无需重建：在 Supabase SQL Editor 单独执行本节即可。
+-- 前端自动探测：函数存在即走此路径，不存在自动回退逐条执行。
+-- ============================================================
+
+create or replace function apply_attendance(p jsonb)
+returns void
+language plpgsql
+security invoker
+as $$
+declare
+  r jsonb;
+begin
+  -- 1. 课次补丁（白名单列，JSON 缺省即保持原值）
+  if p->'sessionPatch' is not null then
+    update sessions set
+      status     = coalesce((p->'sessionPatch'->>'status'), status),
+      hours      = coalesce((p->'sessionPatch'->>'hours')::numeric, hours),
+      date       = coalesce((p->'sessionPatch'->>'date')::date, date),
+      start_time = coalesce((p->'sessionPatch'->>'start_time'), start_time),
+      end_time   = coalesce((p->'sessionPatch'->>'end_time'), end_time),
+      content    = coalesce((p->'sessionPatch'->>'content'), content),
+      location   = coalesce((p->'sessionPatch'->>'location'), location),
+      pool       = coalesce((p->'sessionPatch'->>'pool'), pool)
+    where id = (p->>'sessionId')::uuid;
+  end if;
+
+  -- 2. 点名行批量 upsert
+  for r in select * from jsonb_array_elements(coalesce(p->'upserts', '[]'::jsonb))
+  loop
+    insert into attendance (session_id, student_id, status, package_id, hours, amount, marked, marked_at)
+    values (
+      (r->>'session_id')::uuid,
+      (r->>'student_id')::uuid,
+      coalesce(r->>'status', 'present'),
+      (r->>'package_id')::uuid,
+      coalesce((r->>'hours')::numeric, 0),
+      coalesce((r->>'amount')::numeric, 0),
+      coalesce((r->>'marked')::boolean, true),
+      coalesce((r->>'marked_at')::timestamptz, now())
+    )
+    on conflict (session_id, student_id) do update set
+      status     = excluded.status,
+      package_id = excluded.package_id,
+      hours      = excluded.hours,
+      amount     = excluded.amount,
+      marked     = excluded.marked,
+      marked_at  = excluded.marked_at;
+  end loop;
+
+  -- 3. 课包余额增减（正数消课 / 负数回冲）
+  for r in select * from jsonb_array_elements(coalesce(p->'deltas', '[]'::jsonb))
+  loop
+    update packages
+    set used_hours = round((used_hours + (r->>'hours')::numeric) * 100) / 100
+    where id = (r->>'id')::uuid;
+  end loop;
+end;
+$$;
+
+create or replace function reset_attendance(p jsonb)
+returns void
+language plpgsql
+security invoker
+as $$
+declare
+  r jsonb;
+begin
+  delete from attendance where session_id = (p->>'sessionId')::uuid;
+  update sessions set status = 'scheduled' where id = (p->>'sessionId')::uuid;
+  for r in select * from jsonb_array_elements(coalesce(p->'deltas', '[]'::jsonb))
+  loop
+    update packages
+    set used_hours = round((used_hours + (r->>'hours')::numeric) * 100) / 100
+    where id = (r->>'id')::uuid;
+  end loop;
+end;
+$$;

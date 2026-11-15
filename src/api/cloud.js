@@ -28,6 +28,7 @@ const TABLES = {
 
 export function createCloudApi({ url, anonKey }) {
   const sb = createClient(url, anonKey)
+  let rpcOk = null // null=未探测 / true=消课函数可用 / false=缺失（走兼容路径）
 
   async function all(table, order) {
     let q = sb.from(table).select('*')
@@ -44,6 +45,15 @@ export function createCloudApi({ url, anonKey }) {
     if (/JWT|apikey|Invalid API key/i.test(msg)) return 'anon key 不正确，请检查'
     if (/Failed to fetch|NetworkError/i.test(msg)) return '网络连接失败，请检查 Supabase 地址是否正确'
     return msg
+  }
+
+  // 数据库里还没创建消课函数（42883=undefined function / PGRST202=PostgREST 找不到 RPC）
+  function isMissingRpc(err) {
+    return (
+      err?.code === '42883' ||
+      err?.code === 'PGRST202' ||
+      /function .* does not exist|Could not find the function|schema cache/i.test(err?.message || '')
+    )
   }
 
   return {
@@ -132,43 +142,74 @@ export function createCloudApi({ url, anonKey }) {
       if (error) throw new Error(friendly(error))
     },
     async updateSettings(patch) {
-      for (const [key, value] of Object.entries(patch)) {
-        const { error } = await sb.from('settings').upsert({ key, value }, { onConflict: 'key' })
-        if (error) throw new Error(friendly(error))
-      }
+      await Promise.all(
+        Object.entries(patch).map(async ([key, value]) => {
+          const { error } = await sb.from('settings').upsert({ key, value }, { onConflict: 'key' })
+          if (error) throw new Error(friendly(error))
+        })
+      )
     },
 
+    // —— 消课保存：优先走数据库函数（1 次往返 + 事务原子）；未建函数时自动回退并行路径 ——
     async saveAttendanceBatch({ sessionId, sessionPatch, upserts, deltas }) {
-      if (sessionPatch) {
-        const { error } = await sb.from('sessions').update(toRow(sessionPatch)).eq('id', sessionId)
+      const patch = sessionPatch && Object.keys(sessionPatch).length ? toRow(sessionPatch) : null
+      const payload = { sessionId, sessionPatch: patch, upserts: upserts.map(toRow), deltas: deltas || [] }
+      if (rpcOk !== false) {
+        const { error } = await sb.rpc('apply_attendance', { p: payload })
+        if (!error) {
+          rpcOk = true
+          return
+        }
+        if (!isMissingRpc(error)) throw new Error(friendly(error))
+        rpcOk = false // 本次会话内不再尝试，重载页面后自动重新探测
+      }
+      // 兼容路径：数据库尚未创建 apply_attendance 函数
+      if (patch) {
+        const { error } = await sb.from('sessions').update(patch).eq('id', sessionId)
         if (error) throw new Error(friendly(error))
       }
       if (upserts.length) {
         const { error } = await sb
           .from('attendance')
-          .upsert(upserts.map(toRow), { onConflict: 'session_id,student_id' })
+          .upsert(payload.upserts, { onConflict: 'session_id,student_id' })
         if (error) throw new Error(friendly(error))
       }
-      for (const d of deltas || []) {
-        const { data, error } = await sb.from('packages').select('used_hours').eq('id', d.id).single()
-        if (error) throw new Error(friendly(error))
-        const next = Math.round(((Number(data.used_hours) || 0) + d.hours) * 100) / 100
-        const { error: e2 } = await sb.from('packages').update({ used_hours: next }).eq('id', d.id)
-        if (e2) throw new Error(friendly(e2))
-      }
+      await Promise.all(
+        (deltas || []).map(async (d) => {
+          const { data, error } = await sb.from('packages').select('used_hours').eq('id', d.id).single()
+          if (error) throw new Error(friendly(error))
+          const next = Math.round(((Number(data.used_hours) || 0) + d.hours) * 100) / 100
+          const { error: e2 } = await sb.from('packages').update({ used_hours: next }).eq('id', d.id)
+          if (e2) throw new Error(friendly(e2))
+        })
+      )
     },
     async resetAttendance({ sessionId, deltas }) {
+      if (rpcOk !== false) {
+        const { error } = await sb.rpc('reset_attendance', {
+          p: { sessionId, deltas: deltas || [] },
+        })
+        if (!error) {
+          rpcOk = true
+          return
+        }
+        if (!isMissingRpc(error)) throw new Error(friendly(error))
+        rpcOk = false
+      }
+      // 兼容路径
       const { error } = await sb.from('attendance').delete().eq('session_id', sessionId)
       if (error) throw new Error(friendly(error))
       const { error: e2 } = await sb.from('sessions').update({ status: 'scheduled' }).eq('id', sessionId)
       if (e2) throw new Error(friendly(e2))
-      for (const d of deltas || []) {
-        const { data, error } = await sb.from('packages').select('used_hours').eq('id', d.id).single()
-        if (error) throw new Error(friendly(error))
-        const next = Math.round(((Number(data.used_hours) || 0) + d.hours) * 100) / 100
-        const { error: e3 } = await sb.from('packages').update({ used_hours: next }).eq('id', d.id)
-        if (e3) throw new Error(friendly(e3))
-      }
+      await Promise.all(
+        (deltas || []).map(async (d) => {
+          const { data, error } = await sb.from('packages').select('used_hours').eq('id', d.id).single()
+          if (error) throw new Error(friendly(error))
+          const next = Math.round(((Number(data.used_hours) || 0) + d.hours) * 100) / 100
+          const { error: e3 } = await sb.from('packages').update({ used_hours: next }).eq('id', d.id)
+          if (e3) throw new Error(friendly(e3))
+        })
+      )
     },
 
     // —— 备份（云端：拉全量 → JSON；导入：合并式恢复） ——
